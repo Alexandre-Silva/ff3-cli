@@ -11,6 +11,7 @@ requests = "^2.32.3"
 pydantic = "^2.9.2"
 click = "^8.1.7"
 toml = "^0.10.2"
+typer = "^0.12.5"
 
 
 [build-system]

@@ -1,12 +1,15 @@
 import csv
-from dataclasses import dataclass, field
 import json
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import Self
 
+from pathlib import Path
+import pydantic as pd
 import requests
 import toml
+import typer
 from pydantic import dataclasses as pdd
-import pydantic as pd
 
 
 @dataclass()
@@ -68,7 +71,6 @@ class Client:
 
             res.raise_for_status()
 
-
     def _headers(self):
         return {
             "Authorization": f"Bearer {self.token}",
@@ -80,7 +82,7 @@ class Client:
 class FF3Operator:
     client: Client
 
-    _accounts_raw: list[dict]= field(default_factory=list)
+    _accounts_raw: list[dict] = field(default_factory=list)
 
     def account_fetch(self):
         self._accounts_raw = self.client.get_paged("accounts")
@@ -95,8 +97,7 @@ class FF3Operator:
             self.account_fetch()
 
         for acc in self._accounts_raw:
-            print(acc)
-            notes =acc["attributes"].get("notes")
+            notes = acc["attributes"].get("notes")
             if notes is not None and "Imported from GnuCash" in notes:
                 print(f"Deleting account: {acc['id']} {acc['attributes']['name']}")
                 self.client.delete(f"accounts/{acc['id']}")
@@ -146,6 +147,7 @@ class GCTranslator:
             "Income",
             "Expenses",
             "Current Assets",
+            "Credit Card",
         ):
             print(f"Skipping account: {acc_gc.name}")
             return None
@@ -228,16 +230,89 @@ class FF3Account:
         return data
 
 
-def main():
-    c = Client.from_toml("config.toml")
-    ff3 = FF3Operator(c)
+@dataclass
+class FF3CLI:
+    t: typer.Typer = field(default_factory=typer.Typer)
+    out_format: str = "text"
 
+    def __post_init__(self):
+        self.client = Client.from_toml("config.toml")
+        self.op = FF3Operator(self.client)
+
+
+cli = FF3CLI()
+
+
+class OutFormat(str, Enum):
+    py = "py"
+    json = "json"
+
+
+class AccountGroup(str, Enum):
+    all = "all"
+    imported = "imported"
+
+
+@cli.t.command()
+def account_list(fmt: OutFormat = OutFormat.py):
+    out = cli.op.account_list()
+    if fmt == OutFormat.py:
+        print(out)
+    elif fmt == OutFormat.json:
+        print(json.dumps(out))
+
+
+@cli.t.command()
+def account_create():
+    return cli.client.post("accounts", acc.to_dict())
+
+
+@cli.t.command()
+def account_delete(group: AccountGroup):
+    if group == AccountGroup.imported:
+        return cli.op.account_del_imported()
+    else:
+        print("Not implemented")
+        raise typer.Exit(code=1)
+
+
+class ImportType(str, Enum):
+    gc_accounts = "gnucash-accounts"
+    gc_transactions = "gnucash-transactions"
+
+
+@cli.t.command("import")
+def import_(type_: ImportType, file: Path, do_clear: bool = True):
+    """
+    --do-clear: Clear previously imported data
+    """
+
+    if type_ == ImportType.gc_accounts:
+        if do_clear:
+            cli.op.account_del_imported()
+
+        gc = GCTranslator()
+        gc.load_accounts_csv("accounts.csv")
+        for acc in gc.accounts:
+            ff3_acc = gc.convert_account(acc)
+            if ff3_acc:
+                cli.op.account_create(ff3_acc)
+                # callApi("accounts", body=ff3_acc.dict())
+
+
+    else:
+        print("Not implemented")
+        raise typer.Exit(code=1)
+
+
+def dbg(self):
+    c, op = self.client, self.op
     if False:
-        print(json.dumps(ff3.account_list()))
+        print(json.dumps(op.account_list()))
         return
 
     if True:
-        ff3.account_del_imported()
+        op.account_del_imported()
     return
 
     gc = GCTranslator()
@@ -251,4 +326,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    cli.t()

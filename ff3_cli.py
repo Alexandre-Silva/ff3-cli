@@ -2,7 +2,7 @@ import csv
 import json
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Self
+from typing import Self, Any
 
 from pathlib import Path
 import pydantic as pd
@@ -83,9 +83,42 @@ class FF3Operator:
     client: Client
 
     _accounts_raw: list[dict] = field(default_factory=list)
+    _accounts: list["FF3Account"] = field(default_factory=list)
 
     def account_fetch(self):
         self._accounts_raw = self.client.get_paged("accounts")
+        self.account_convert()
+
+    def account_convert(self):
+        adapter: pd.TypeAdapter[FF3Account] = pd.TypeAdapter(FF3Account)
+
+        for d in self._accounts_raw:
+            notes: str | None = d["attributes"].get("notes")
+            meta = {}
+
+            if notes and "--meta--" in notes:
+                meta_raw = []
+                notes_l = notes.splitlines()
+                in_meta = False
+                for l in notes_l:
+                    if "--meta--" in l:
+                        in_meta = True
+                        continue
+                    elif in_meta:
+                        meta_raw.append(l)
+                    elif "--meta-end--" in l:
+                        break
+
+                if notes_l:
+                    meta = json.loads("".join(meta_raw))
+
+                    print(f"{notes} -> {meta}")
+
+            acc = adapter.validate_python(d["attributes"])
+            acc.id_ = d["id"]
+            acc._meta = meta
+
+            self._accounts.append(acc)
 
     def account_list(self):
         if len(self._accounts_raw) == 0:
@@ -164,7 +197,16 @@ class GCTranslator:
 
         name = ":".join(subname[1:])
 
-        description = f"{acc_gc.description}\n\nImported from GnuCash"
+        meta = json.dumps({"name": acc_gc.name_full})
+
+        description = f"""{acc_gc.description}
+
+Imported from GnuCash
+
+--meta--
+{meta}
+--meta-end--
+"""
 
         if new_type == "asset":
             acc_ff3 = FF3Account(
@@ -213,12 +255,14 @@ class GCAccount:
 
 @pdd.dataclass()
 class FF3Account:
-    name: str = pd.Field()
-    type_: str = pd.Field(serialization_alias="type")
-    role: str | None = pd.Field(default=None, serialization_alias="account_role")
+    type_: str = pd.Field(alias="type")
+    id_: int = pd.Field(default=-1, exclude=True)
+    name: str = pd.Field(default="")
+    role: str | None = pd.Field(default=None, alias="account_role")
     currency_code: str = pd.Field(default="EUR")
     include_net_worth: bool = pd.Field(default=True)
-    notes: str = pd.Field(default="")
+    notes: str | None = pd.Field(default="")
+    _meta: dict[str, Any] = pd.Field(default_factory=dict, exclude=True)
 
     def to_dict(self):
         adapter = pd.TypeAdapter(FF3Account)
@@ -254,7 +298,7 @@ class AccountGroup(str, Enum):
 
 
 @cli.t.command()
-def account_list(fmt: OutFormat = OutFormat.py):
+def account_list(fmt: OutFormat = OutFormat.py, raw: bool = True):
     out = cli.op.account_list()
     if fmt == OutFormat.py:
         print(out)
@@ -292,13 +336,12 @@ def import_(type_: ImportType, file: Path, do_clear: bool = True):
             cli.op.account_del_imported()
 
         gc = GCTranslator()
-        gc.load_accounts_csv("accounts.csv")
+        gc.load_accounts_csv(file)
         for acc in gc.accounts:
             ff3_acc = gc.convert_account(acc)
             if ff3_acc:
                 cli.op.account_create(ff3_acc)
                 # callApi("accounts", body=ff3_acc.dict())
-
 
     else:
         print("Not implemented")
